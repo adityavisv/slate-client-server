@@ -58,6 +58,8 @@ crow::response listClusters(PersistentStore& store, const crow::request& req){
 			rapidjson::Value entry(rapidjson::kObjectType);
 			entry.AddMember("lat",location.lat, alloc);
 			entry.AddMember("lon",location.lon, alloc);
+			if(!location.description.empty())
+				entry.AddMember("desc",location.description, alloc);
 			clusterLocation.PushBack(entry, alloc);
 		}
 		clusterData.AddMember("location", clusterLocation, alloc);
@@ -684,6 +686,21 @@ crow::response deleteCluster(PersistentStore& store, const crow::request& req,
 }
 
 namespace internal{
+std::string removeClusterMonitoringCredential(PersistentStore& store, 
+                                              const Cluster& cluster){
+	if(cluster.monitoringCredential){
+		log_info("Attempting to remove monitoring credential for " << cluster);
+		bool removed=store.removeClusterMonitoringCredential(cluster.id);
+		if(!removed)
+			return "Failed to remove monitoring credential for Cluster "+cluster.name;
+		//mark the credential record as revoked so it can be garbage collected
+		bool revoked=store.revokeMonitoringCredential(cluster.monitoringCredential.accessKey);
+		if(!removed)
+			return "Failed to revoke used monitoring credential for Cluster "+cluster.monitoringCredential.accessKey;
+	}
+	return "";
+}
+	
 std::string deleteCluster(PersistentStore& store, const Cluster& cluster, bool force){
 	// Delete any remaining instances that are present on the cluster
 	auto configPath=store.configPathForCluster(cluster.id);
@@ -768,6 +785,12 @@ std::string deleteCluster(PersistentStore& store, const Cluster& cluster, bool f
 	}
 	else{
 		log_warn("Not able to change DNS records, so the record for " << dnsName << " cannot be deleted if it exists");
+	}
+	
+	auto credRemoval=internal::removeClusterMonitoringCredential(store,cluster);
+	if(!credRemoval.empty()){
+		log_error(credRemoval);
+		return "Cluster deletion failed: "+credRemoval;
 	}
 	
 	log_info("Deleting " << cluster);
@@ -891,7 +914,7 @@ crow::response listClusterAllowedgroups(PersistentStore& store, const crow::requ
 	result.AddMember("apiVersion", "v1alpha3", alloc);
 	rapidjson::Value resultItems(rapidjson::kArrayType);
 	
-	std::vector<std::string> groupIDs=store.listgroupsAllowedOnCluster(cluster.id);
+	std::vector<std::string> groupIDs=store.listGroupsAllowedOnCluster(cluster.id);
 	//if result is a wildcard skip the usual steps
 	if(groupIDs.size()==1 && groupIDs.front()==PersistentStore::wildcard){
 		rapidjson::Value metadata(rapidjson::kObjectType);
@@ -930,6 +953,46 @@ crow::response listClusterAllowedgroups(PersistentStore& store, const crow::requ
 	}
 	result.AddMember("items", resultItems, alloc);
 	
+	return crow::response(to_string(result));
+}
+
+crow::response checkGroupClusterAccess(PersistentStore& store, const crow::request& req, 
+									   const std::string& clusterID, const std::string& groupID){
+	const User user=authenticateUser(store, req.url_params.get("token"));
+	log_info(user << " requested to check whether Group " << groupID << " access has to cluster " << clusterID << " from " << req.remote_endpoint);
+	if(!user)
+		return crow::response(403,generateError("Not authorized"));
+	
+	//validate input
+	const Cluster cluster=store.getCluster(clusterID);
+	if(!cluster)
+		return crow::response(404,generateError("Cluster not found"));
+	
+	rapidjson::Document result(rapidjson::kObjectType);
+	rapidjson::Document::AllocatorType& alloc = result.GetAllocator();
+	result.AddMember("apiVersion", "v1alpha3", alloc);
+	result.AddMember("cluster", clusterID, alloc);
+	result.AddMember("group", groupID, alloc);
+	
+	//handle wildcard requests specially
+	if(groupID==PersistentStore::wildcard || groupID==PersistentStore::wildcardName){
+		bool allowed=store.clusterAllowsAllGroups(clusterID);
+		result.AddMember("accessAllowed", allowed, alloc);
+		return crow::response(to_string(result));
+	}
+	
+	const Group group=store.getGroup(groupID);
+	if(!group) //more input validation
+		return crow::response(404,generateError("Cluster not found"));
+	
+	//if the group is the owner of the cluster, the answer is yes and we're done
+	if(group.id == cluster.owningGroup){
+		result.AddMember("accessAllowed", true, alloc);
+		return crow::response(to_string(result));
+	}
+	bool allowed=store.groupAllowedOnCluster(group.id,cluster.id);
+	log_info(group << (allowed?" is ":" is not ") << "allowed on " << cluster);
+	result.AddMember("accessAllowed", allowed, alloc);
 	return crow::response(to_string(result));
 }
 
@@ -1206,7 +1269,7 @@ crow::response removeClusterMonitoringCredential(PersistentStore& store,
                                                  const crow::request& req,
                                                  const std::string& clusterID){
 	const User user=authenticateUser(store, req.url_params.get("token"));
-	log_info(user << " requested to fetch the monitoring credential for Cluster " << clusterID);
+	log_info(user << " requested to remove the monitoring credential for Cluster " << clusterID);
 	if(!user)
 		return crow::response(403,generateError("Not authorized"));
 	
@@ -1218,19 +1281,10 @@ crow::response removeClusterMonitoringCredential(PersistentStore& store,
 	if(!user.admin && !store.userInGroup(user.id,cluster.owningGroup))
 		return crow::response(403,generateError("Not authorized"));
 	
-	if(cluster.monitoringCredential){
-		log_info("Attempting to assign monitoring credential for " << cluster);
-		bool removed=store.removeClusterMonitoringCredential(cluster.id);
-		if(!removed){
-			log_error("Failed to remove monitoring credential for " << cluster);
-			return crow::response(500,generateError("Removing monitoring credential failed"));
-		}
-		//mark the credential record as revoked so it can be garbage collected
-		bool revoked=store.revokeMonitoringCredential(cluster.monitoringCredential.accessKey);
-		if(!removed){
-			log_error("Failed to revoke monitoring credential " << cluster.monitoringCredential);
-			return crow::response(500,generateError("Revoking monitoring credential failed"));
-		}
+	auto credRemoval=internal::removeClusterMonitoringCredential(store,cluster);
+	if(!credRemoval.empty()){
+		log_error(credRemoval);
+		return crow::response(500,generateError("Removing monitoring credential failed"));
 	}
 	
 	return crow::response(200);

@@ -209,6 +209,11 @@ bool ProcessIOBuffer::waitReady(rw direction, bool wait){
 			int err=errno;
 			if(err!=EAGAIN && err!=EINTR){
 				std::cerr << "select gave error " << err << std::endl;
+				if(err==9){
+					std::cerr << "fds were: fd_out=" << fd_out << " fd_in=" 
+					<< fd_in << " maxfd=" << maxfd << " direction=" 
+					<< (direction==READ ? "READ" : "WRITE") << std::endl;
+				}
 				return false;
 			}
 		}
@@ -478,32 +483,43 @@ ProcessHandle startProcessAsync(std::string exe, const std::vector<std::string>&
 		int err=stat(exe.c_str(),&info);
 		if(err){
 			err=errno;
-			throw std::runtime_error("Cannot stat "+exe+": Error "+std::to_string(err));
+			throw std::runtime_error("Cannot stat "+exe+": Error "+std::to_string(err)+": "+strerror(err));
 		}
 	}
 	//set argv[0] now that we are sure we know what it is
 	rawArgs[0]=exe.c_str();
 	
+	struct FdCloser{
+		int& fd;
+		bool active;
+		FdCloser(int& fd):fd(fd),active(true){}
+		~FdCloser(){ if(active && fd!=-1){ close(fd); }};
+		int take(){ active=false; return fd; }
+	};
+	
 	int err;
 	//create communication pipes
-	int inpipe[2];
-	int outpipe[2];
-	int errpipe[2];
+	int inpipe[2]={-1,-1};
+	int outpipe[2]={-1,-1};
+	int errpipe[2]={-1,-1};
+	FdCloser incloser[2]={{inpipe[0]},{inpipe[1]}};
+	FdCloser outcloser[2]={{outpipe[0]},{outpipe[1]}};
+	FdCloser errcloser[2]={{errpipe[0]},{errpipe[1]}};
 	if(!detachable){
-	err=pipe(inpipe);
+		err=pipe(inpipe);
 		if(err){
 			err=errno;
-			throw std::runtime_error("Unable to allocate pipe: Error "+std::to_string(err));
+			throw std::runtime_error("Unable to allocate pipe: Error "+std::to_string(err)+": "+strerror(err));
 		}
 		err=pipe(outpipe);
 		if(err){
 			err=errno;
-			throw std::runtime_error("Unable to allocate pipe: Error "+std::to_string(err));
+			throw std::runtime_error("Unable to allocate pipe: Error "+std::to_string(err)+": "+strerror(err));
 		}
 		err=pipe(errpipe);
 		if(err){
 			err=errno;
-			throw std::runtime_error("Unable to allocate pipe: Error "+std::to_string(err));
+			throw std::runtime_error("Unable to allocate pipe: Error "+std::to_string(err)+": "+strerror(err));
 		}
 	}
 	
@@ -511,8 +527,7 @@ ProcessHandle startProcessAsync(std::string exe, const std::vector<std::string>&
 	pid_t child=fork();
 	if(child<0){ //fork failed
 		auto err=errno;
-		std::cerr << "Failed to start child process: Error " << err << std::endl;
-		return ProcessHandle{};
+		throw std::runtime_error("Failed to start child process: Error "+std::to_string(err)+": "+strerror(err));
 	}
 	if(!child){ //if we don't know who the child is, it is us
 		callbacks.inChild();
@@ -536,16 +551,13 @@ ProcessHandle startProcessAsync(std::string exe, const std::vector<std::string>&
 		int err=errno;
 		//not that this will be any help if we are detatchable
 		fprintf(stderr,"Exec failed: Error %i\n",err);
+		exit(err);
 	}
 	//otherwise, we are still the parent
 	callbacks.inParent();
 	//close ends of pipes we will not use
-	if(!detachable){
-		close(inpipe[0]);
-		close(outpipe[1]);
-		close(errpipe[1]);
-		return ProcessHandle(child,inpipe[1],outpipe[0],errpipe[0]);
-	}
+	if(!detachable)
+		return ProcessHandle(child,incloser[1].take(),outcloser[0].take(),errcloser[0].take());
 	return ProcessHandle(child);
 }
 

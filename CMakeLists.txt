@@ -103,14 +103,23 @@ if(BUILD_CLIENT)
     ${CMAKE_SOURCE_DIR}/src/client/ClusterRegistration.cpp
     ${CMAKE_SOURCE_DIR}/src/client/Completion.cpp
     ${CMAKE_SOURCE_DIR}/src/client/SecretLoading.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/cluster_components/FederationRBAC.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/cluster_components/IngressController.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/cluster_components/PrometheusMonitoring.cpp
     ${CMAKE_SOURCE_DIR}/src/Archive.cpp
     ${CMAKE_SOURCE_DIR}/src/FileHandle.cpp
     ${CMAKE_SOURCE_DIR}/src/FileSystem.cpp
     ${CMAKE_SOURCE_DIR}/src/HTTPRequests.cpp
+    ${CMAKE_SOURCE_DIR}/src/KubeInterface.cpp
     ${CMAKE_SOURCE_DIR}/src/Process.cpp
     ${CMAKE_SOURCE_DIR}/src/Utilities.cpp
   )
+  SET(SLATE_CLIENT_COMPILE_OPTIONS
+      -DSLATE_CLIENT
+  )
+
   add_executable(slate ${CLIENT_SOURCES})
+  target_compile_options(slate PRIVATE ${SLATE_CLIENT_COMPILE_OPTIONS} )
   target_include_directories (slate
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -169,6 +178,42 @@ if(BUILD_CLIENT)
   # TODO: uninstall
 endif(BUILD_CLIENT)
 
+LIST(APPEND STRESS_TEST_SOURCES
+  ${CMAKE_SOURCE_DIR}/src/StressTest.cpp
+  ${CMAKE_SOURCE_DIR}/src/Archive.cpp
+  ${CMAKE_SOURCE_DIR}/src/FileHandle.cpp
+  ${CMAKE_SOURCE_DIR}/src/FileSystem.cpp
+  ${CMAKE_SOURCE_DIR}/src/HTTPRequests.cpp
+  ${CMAKE_SOURCE_DIR}/src/KubeInterface.cpp
+  ${CMAKE_SOURCE_DIR}/src/Process.cpp
+  ${CMAKE_SOURCE_DIR}/src/Utilities.cpp
+)
+SET(STRESS_TEST_COMPILE_OPTIONS
+    -DSLATE_CLIENT
+)
+add_executable(slate-stress-test ${STRESS_TEST_SOURCES})
+target_compile_options(slate-stress-test PRIVATE ${SLATE_CLIENT_COMPILE_OPTIONS} )
+target_include_directories (slate-stress-test
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/resources>
+    $<INSTALL_INTERFACE:include>
+    ${CURL_INCLUDE_DIRS}
+    ${LIBCRYPTO_CFLAGS}
+    ${SSL_CFLAGS}
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
+)
+target_link_libraries(slate-stress-test
+  PUBLIC
+    ${CURL_LIBRARIES}
+    ${SSL_LDFLAGS}
+    ${LIBCRYPTO_LDFLAGS}
+    z
+    pthread
+)
+target_compile_options(slate-stress-test PRIVATE -DRAPIDJSON_HAS_STDSTRING -Os -std=c++11)
+
+
 # -----------------------------------------------------------------------------
 # Main executable
 if(BUILD_SERVER)
@@ -209,6 +254,7 @@ if(BUILD_SERVER)
   )
   
   SET(SLATE_SERVER_COMPILE_OPTIONS 
+    -DSLATE_SERVER
     ${CURL_CFLAGS}
     ${LIBCRYPTO_CFLAGS}
     ${SSL_CFLAGS}
@@ -469,6 +515,9 @@ if(BUILD_SERVER)
     
     slate_add_test(test-cluster-allowed-group-listing
         SOURCE_FILES test/TestClusterAllowedGroupListing.cpp)
+    
+    slate_add_test(test-cluster-allowed-group-checking
+        SOURCE_FILES test/TestClusterAllowedGroupChecking.cpp)
     
     slate_add_test(test-cluster-allowed-group-addition
         SOURCE_FILES test/TestClusterAllowedGroupAddition.cpp)

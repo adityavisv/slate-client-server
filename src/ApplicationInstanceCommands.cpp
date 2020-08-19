@@ -162,10 +162,45 @@ std::multimap<std::string,ServiceInterface> getServices(const SharedFileHandle& 
 				log_error("Did not find any pods matching service selector for " << nspace << "::" << serviceName);
 				continue;
 			}
-			if(podData["items"][0]["status"].HasMember("hostIP"))
-				interface.externalIP=podData["items"][0]["status"]["hostIP"].GetString();
-			else
+			if(podData["items"][0]["status"].HasMember("hostIP")){
+				// now we should get the node info, to see if it has a ExternalIP which we ought to preferentially use
+				if(podData["items"][0]["spec"].HasMember("nodeName")) {
+					auto nodename=podData["items"][0]["spec"]["nodeName"].GetString();
+
+					t1 = high_resolution_clock::now();
+					auto nodeResult=kubernetes::kubectl(*configPath,{"get","node",nodename,"-o=json"});
+					t2 = high_resolution_clock::now();
+					log_info("kubectl get node completed in " << duration_cast<duration<double>>(t2-t1).count() << " seconds");
+					if(nodeResult.status){
+						log_error("kubectl get node " << nodename << " failed: " << nodeResult.error);
+						continue;
+					}
+
+					// preemptively set the externalIP to hostIP from the pod
+					// data, but we'll try to get something more accurate
+					interface.externalIP=podData["items"][0]["status"]["hostIP"].GetString();
+
+					rapidjson::Document nodeData;
+					try{
+						nodeData.Parse(nodeResult.output.c_str());
+					}catch(std::runtime_error& err){
+						log_error("Unable to parse kubectl node JSON output for kubectl get node " << nodename << ": " << err.what());
+						continue;
+					}
+
+					if(nodeData.HasMember("status")){
+						for (auto& addr : nodeData["status"]["addresses"].GetArray()) {
+							std::string addrType(addr["type"].GetString());
+							// assume that externalIP won't show up more than once
+							if (addrType == "ExternalIP") {
+								interface.externalIP=addr["address"].GetString();
+							}
+						}
+					} 
+				} 
+			} else {
 				interface.externalIP="<none>";
+            }
 		}
 		else if(serviceType=="ClusterIP"){
 			//Do nothing
@@ -320,8 +355,21 @@ rapidjson::Value fetchInstanceDetails(PersistentStore& store,
 				rapidjson::Value containers(rapidjson::kArrayType);
 				for(auto& item : pod["status"]["containerStatuses"].GetArray()){
 					rapidjson::Value container(rapidjson::kObjectType);
+					//TODO: when deealing with an image from a non-default
+					//registry, we shold make sure to capture that somewhere
 					if(item.HasMember("image"))
 						container.AddMember("image",item["image"],alloc);
+					if(item.HasMember("imageID")){
+						std::string idStr=item["imageID"].GetString();
+						//try to simplify and remove redundant information, 
+						//cutting down 
+						//docker-pullable://repo/name@sha256:0123456789...
+						//to just the hash part, 0123456789...
+						auto pos=idStr.rfind(':');
+						if(pos!=std::string::npos && (pos+1)<idStr.size())
+							idStr=idStr.substr(pos+1);
+						container.AddMember("imageID",idStr,alloc);
+					}
 					if(item.HasMember("name"))
 						container.AddMember("name",item["name"],alloc);
 					if(item.HasMember("ready"))

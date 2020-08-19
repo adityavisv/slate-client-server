@@ -141,62 +141,61 @@ Client::ProgressManager::ProgressManager():
 stop_(false),
 showingProgress_(false),
 thread_([this](){
-  using std::chrono::system_clock;
-  using duration=system_clock::time_point::duration;
-  using mduration=std::chrono::duration<long long,std::milli>;
-  duration sleepLen=std::chrono::duration_cast<duration>(mduration(1000));//one second
-  system_clock::time_point nextTick=system_clock::now();
-  nextTick+=sleepLen;
-  
-  WorkItem w;
-  while(true){
-    bool doNext=false;
+	using std::chrono::system_clock;
+	using duration=system_clock::time_point::duration;
+	using mduration=std::chrono::duration<long long,std::milli>;
+	duration sleepLen=std::chrono::duration_cast<duration>(mduration(1000));//one second
+	system_clock::time_point nextTick=system_clock::now();
+	nextTick+=sleepLen;
+	
+	WorkItem w;
+	while(true){
+		bool doNext=false;
     
-    { //hold lock
-      std::unique_lock<std::mutex> lock(this->mut_);
-      //Wait for something to happen
-      this->cond_.wait_until(lock,nextTick,
-                             [this]{ return(this->stop_ || !this->work_.empty()); });
-      //Figure out why we woke up
-      if(this->stop_)
-        return;
-      //See if there's any work
-      if(this->work_.empty()){
-        //Nope. Back to sleep.
-        nextTick+=sleepLen;
-        continue;
-      }
-      //There is work. Should it be done now?
-      nextTick=this->work_.top().time_;
-      if(system_clock::now()>=nextTick){ //time to do it
-        w=std::move(this->work_.top());
-        this->work_.pop();
-	//Update work to repeat action if repeat work is set to true
-	if(this->repeatWork_)
-	  this->ShowSomeProgress();
-        //Update the time to next sleep until
-        if(!this->work_.empty())
-          nextTick=this->work_.top().time_;
-        else
-          nextTick+=sleepLen;
-        doNext=true;
-      }
-    } //release lock
-    if(doNext){
-      w.work_();
-      doNext=false;
-    }
-  }
+		{ //hold lock
+			std::unique_lock<std::mutex> lock(this->mut_);
+			//Wait for something to happen
+			this->cond_.wait_until(lock,nextTick,[this]{ return(this->stop_); });
+			//Figure out why we woke up
+			if(this->stop_)
+				return;
+			//See if there's any work
+			if(this->work_.empty()){
+				//Nope. Back to sleep.
+				nextTick+=sleepLen;
+				continue;
+			}
+			//There is work. Should it be done now?
+			nextTick=this->work_.top().time_;
+			if(system_clock::now()>=nextTick){ //time to do it
+				w=std::move(this->work_.top());
+				this->work_.pop();
+				//Update work to repeat action if repeat work is set to true
+				if(this->repeatWork_)
+					this->ShowSomeProgress();
+				//Update the time to next sleep until
+				if(!this->work_.empty())
+					nextTick=this->work_.top().time_;
+				else
+					nextTick+=sleepLen;
+				doNext=true;
+			}
+		} //release lock
+		if(doNext){
+			w.work_();
+			doNext=false;
+		}
+	}
 })
 {}
 
 Client::ProgressManager::~ProgressManager(){
-  {
-    std::unique_lock<std::mutex> lock(mut_);
-    stop_=true;
-  }
-  cond_.notify_all();
-  thread_.join();
+	{
+		std::unique_lock<std::mutex> lock(mut_);
+		stop_=true;
+	}
+	cond_.notify_all();
+	thread_.join();
 }
 
 Client::ProgressManager::WorkItem::WorkItem(std::chrono::system_clock::time_point t,
@@ -204,7 +203,7 @@ Client::ProgressManager::WorkItem::WorkItem(std::chrono::system_clock::time_poin
 time_(t),work_(w){}
 
 bool Client::ProgressManager::WorkItem::operator<(const Client::ProgressManager::WorkItem& other) const{
-  return(time_<other.time_);
+	return(time_<other.time_);
 }
 
 void Client::ProgressManager::start_scan_progress(std::string msg) {
@@ -472,11 +471,12 @@ std::string Client::jsonListToTable(const rapidjson::Value& jdata,
 
 	int indexer = 0;	
 	if (this->orderBy != ""){
-			auto foundIt = std::find_if(columns.begin(),columns.end(),
-			[this](const columnSpec& spec) -> bool {return spec.label == this->orderBy;});
-			if (foundIt != columns.end()){
-				indexer = std::distance(columns.begin(), foundIt);
-			}
+		auto foundIt = std::find_if(columns.begin(),columns.end(),
+									[this](const columnSpec& spec) -> bool {return spec.label == this->orderBy;});
+		if (foundIt != columns.end())
+			indexer = std::distance(columns.begin(), foundIt);
+		else
+			indexer=-1;
 	}
 	
 	//Prepare the String vector for rows the decoded JSON object
@@ -526,6 +526,7 @@ std::string Client::jsonListToTable(const rapidjson::Value& jdata,
 
 	int subsetIndex = headers ? 1 : 0;
 
+	if(indexer>=0)
 	std::sort(
 		data.begin() + subsetIndex, data.end(),
         	[indexer](const std::vector<std::string>& a, const std::vector<std::string>& b)
@@ -706,7 +707,14 @@ clusterComponents{
 	                  &Client::installFederationRBAC,
 	                  &Client::removeFederationRBAC,
 	                  &Client::installFederationRBAC, //update same as install
-	                  nullptr/*&Client::ensureRBAC*/}}
+	                  nullptr/*&Client::ensureRBAC*/}},
+	{"prometheusMonitoring",ClusterComponent{
+	                        "Central monitoring provided by the SLATE platform","v1",
+	                        &Client::checkPrometheusMonitoring,
+	                        &Client::installPrometheusMonitoring,
+	                        &Client::removePrometheusMonitoring,
+	                        &Client::upgradePrometheusMonitoring,
+	                        nullptr}}
 }
 {
 	if(isatty(STDOUT_FILENO)){
@@ -1068,49 +1076,81 @@ rapidjson::Document Client::getClusterList(std::string group){
 }
 
 void Client::listClustersAccessibleToGroup(const GroupListAllowedOptions& opt){
-	rapidjson::Document json = getClusterList(opt.groupName);
+	rapidjson::Document clusterListJSON = getClusterList(opt.groupName);
 	ProgressToken progress(pman_,"Fetching accessible clusters...");
-	const rapidjson::Value& clusters = json["items"];
-	assert(clusters.IsArray());
+	if(!clusterListJSON.HasMember("items") || !clusterListJSON["items"].IsArray()){
+		std::cerr << "Cluster list response from API server does not have expected structure";
+		throw OperationFailed();
+	}
+	const rapidjson::Value& clusters = clusterListJSON["items"];
+	rapidjson::Document accessRequest(rapidjson::kObjectType);
+	auto& requestAlloc=accessRequest.GetAllocator();
+	std::map<std::string,std::string> urlsToClusters;
+	for (const auto& cluster : clusters.GetArray()) {
+		if(!cluster.HasMember("metadata") || !cluster["metadata"].IsObject()
+		   || !cluster["metadata"].HasMember("name") || !cluster["metadata"]["name"].IsString())
+			continue;
+		const rapidjson::Value& name = cluster["metadata"]["name"];
+		std::string requestURL="/"+apiVersion+"/clusters/"+name.GetString()+"/allowed_groups/"+opt.groupName+"?token="+getToken();
+		rapidjson::Value request(rapidjson::kObjectType);
+		request.AddMember("method","GET",requestAlloc);
+		request.AddMember("body","",requestAlloc);
+		accessRequest.AddMember(rapidjson::Value().SetString(requestURL,requestAlloc),request,requestAlloc);
+		urlsToClusters.emplace(requestURL,name.GetString());
+	}
+	
+	rapidjson::StringBuffer buffer;
+	rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+	accessRequest.Accept(writer);
+	auto response=httpRequests::httpPost(makeURL("multiplex"),buffer.GetString(),
+										defaultOptions());
+	
+	if(response.status!=200){
+		std::cerr << "Failed to get cluster group access information";
+		showError(response.body);
+		throw OperationFailed();
+	}
+	
+	rapidjson::Document json;
+	json.Parse(response.body.c_str());
+	
+	if(!json.IsObject()){
+		std::cerr << "Cluster access response from API server does not have expected structure";
+		throw OperationFailed();
+	}
+	
 	std::vector<std::string> clustersToPrint;
 	rapidjson::Document array(rapidjson::kArrayType);
 	auto& allocator = array.GetAllocator();
-	for (const auto& cluster : clusters.GetArray()) {
-		const rapidjson::Value& name = cluster["metadata"]["name"];
-		// now get the info for each cluster
-		ProgressToken progress(pman_,std::string("Fetching groups with access to cluster `")+name.GetString()+"`...");
-		auto response=httpRequests::httpGet(makeURL(std::string("clusters/")
-	                                            +name.GetString()
-	                                            +"/allowed_groups"),
-	                                    defaultOptions());
-		if(response.status!=200){
-			std::cerr << "Failed to retrieve groups with access to cluster " << name.GetString();
-			showError(response.body);
-			return;
-		}
-
-		rapidjson::Document clusterInfo;
-		clusterInfo.Parse(response.body.c_str());
-		for (const auto& item : clusterInfo["items"].GetArray()) {
-			auto& gid = item["metadata"]["id"];
-			if (item["metadata"]["name"] == opt.groupName ||
-					gid == "*") {
+	for(const auto& result : json.GetObject()){
+		if(!result.value.HasMember("status") || !result.value.HasMember("body")
+		   || !result.value["status"].IsInt() || !result.value["body"].IsString())
+			continue;
+		if(result.value["status"].GetInt()!=200)
+			continue;
+		
+		try{
+			auto url=result.name.GetString();
+			if(urlsToClusters.find(url)==urlsToClusters.end())
+				continue;
+			auto name=urlsToClusters[url];
+			rapidjson::Document resultBody;
+			resultBody.Parse(result.value["body"].GetString());
+			auto& gid = resultBody["group"];
+			if(resultBody["accessAllowed"].IsBool() && resultBody["accessAllowed"].GetBool()){
 				array.PushBack(rapidjson::Value(rapidjson::kObjectType)
-						.AddMember(
-							"cluster",
-							rapidjson::Value()
-								.CopyFrom(name,
-									allocator),
-							allocator)
-						.AddMember(
-							"gid",
-							rapidjson::Value()
-								.CopyFrom(gid,
-									allocator),
-							allocator),
-						allocator);
-				break;
+							   .AddMember("cluster",
+										  rapidjson::Value()
+										  .SetString(name,allocator),
+										  allocator)
+							   .AddMember("gid",
+										  rapidjson::Value()
+										  .CopyFrom(gid,allocator),
+										  allocator),
+							   allocator);
 			}
+		}catch(std::exception& ex){
+			continue;
 		}
 	}
 	std::cout << formatOutput(array, array, {{"Cluster", "/cluster"},{"ID", "/gid", true}});
@@ -1133,8 +1173,10 @@ void Client::createCluster(const ClusterCreateOptions& opt){
 	ClusterConfig config=extractClusterConfig(configPath,opt.assumeYes);
 	
 	if(!opt.noIngress){
-	//set up the ingress controller
-	bool hasLoadBalancer=checkLoadBalancer(configPath, opt.assumeYes);
+		//set up the ingress controller
+		bool hasLoadBalancer=opt.assumeLoadBalancer;
+		if(!hasLoadBalancer)
+			hasLoadBalancer=checkLoadBalancer(configPath, opt.assumeYes);
 		if(!hasLoadBalancer)
 			throw std::runtime_error("SLATE's ingress controller needs a load balancer in order to function correctly.");
 	
@@ -1332,10 +1374,30 @@ void Client::getClusterInfo(const ClusterInfoOptions& opt){
 		if(json["metadata"].HasMember("nodes") && json["metadata"]["nodes"].IsArray()
 		  && json["metadata"]["nodes"].GetArray().Size()>0){
 			std::cout << "\nNode Address Information:" << std::endl;
-			for (auto& node : json["metadata"]["nodes"].GetArray()) {
-				std::cout << "---- Node: " << node["name"].GetString() << std::endl;
-				std::cout << formatOutput(node["addresses"], node, {{"Address", "/address"},{"Type", "/addressType"}});
+			//restructure data for more convenient printing in a table
+			rapidjson::Document nodeData(rapidjson::kArrayType);
+			rapidjson::Document::AllocatorType& alloc = nodeData.GetAllocator();
+			for(const auto& node : json["metadata"]["nodes"].GetArray()) {
+				bool first=true;
+				if(!node["addresses"].IsArray())
+					continue;
+				for(const auto& addr : node["addresses"].GetArray()){
+					rapidjson::Value entry(rapidjson::kObjectType);
+					entry.AddMember("name",rapidjson::StringRef(first?node["name"].GetString():""),alloc);
+					first=false;
+					entry.AddMember("address",rapidjson::StringRef(addr["address"].GetString()),alloc);
+					entry.AddMember("addressType",rapidjson::StringRef(addr["addressType"].GetString()),alloc);
+					nodeData.PushBack(entry, alloc);
+				}
 			}
+			std::string oldOrder=orderBy;
+			orderBy="nothing";
+			std::cout << formatOutput(nodeData, json["metadata"]["nodes"], 
+			                          {{"Node", "/name"},
+			                           {"Address", "/address"},
+			                           {"Type", "/addressType"}
+									  }) << std::endl;
+			orderBy=oldOrder;
 		}
 	}
 	else{
@@ -1982,6 +2044,8 @@ void Client::getInstanceInfo(const InstanceOptions& opt){
 							std::cout << "        Restarts: " << container["restartCount"].GetUint() << '\n';
 						if(container.HasMember("image"))
 							std::cout << "        Image: " << container["image"].GetString() << '\n';
+						if(container.HasMember("imageID"))
+							std::cout << "        ImageID: " << container["imageID"].GetString() << '\n';
 						if(container.HasMember("lastState") && !container["lastState"].ObjectEmpty()){
 							std::cout << "        Last State: ";
 							bool firstState=true;
@@ -2947,19 +3011,19 @@ std::string Client::getKubeconfigPath(std::string configPath) const{
 	return configPath;
 }
 
-std::string Client::getDefaultEndpointFilePath(){
+std::string Client::getDefaultEndpointFilePath() const{
 	std::string path=getHomeDirectory();
 	path+=".slate/endpoint";
 	return path;
 }
 
-std::string Client::getDefaultCredFilePath(){
+std::string Client::getDefaultCredFilePath() const{
 	std::string path=getHomeDirectory();
 	path+=".slate/token";
 	return path;
 }
 
-std::string Client::fetchStoredCredentials(){
+std::string Client::fetchStoredCredentials() const{
 	PermState perms=checkPermissions(credentialPath);
 	if(perms==PermState::INVALID)
 		throw std::runtime_error("Credentials file "+credentialPath+
@@ -2985,7 +3049,7 @@ void Client::updateStoredCredentials(std::string token) {
 	ofs.close();
 }
 
-std::string Client::getToken(){
+std::string Client::getToken() const{
 	if(token.empty()){ //need to read in
 		if(credentialPath.empty()) //use default if not specified
 			credentialPath=getDefaultCredFilePath();
@@ -2994,7 +3058,7 @@ std::string Client::getToken(){
 	return token;
 }
 
-std::string Client::getEndpoint(){
+std::string Client::getEndpoint() const{
 	if(apiEndpoint.empty()){ //need to read in
 		if(endpointPath.empty())
 			endpointPath=getDefaultEndpointFilePath();
