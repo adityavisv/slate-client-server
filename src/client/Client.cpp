@@ -105,7 +105,7 @@ std::string Client::underline(std::string s) const{
 }
 std::string Client::bold(std::string s) const{
 	if(useANSICodes)
-		return("\x1B[1m"+s+"\x1B[22m");
+		return("\x1B[1m"+s+"\x1b[0m");
 	return s;
 }
 
